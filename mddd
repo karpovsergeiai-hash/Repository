@@ -1,0 +1,234 @@
+AI CONTEXT / Документация для нейросетей (lerasystem.ru)
+Цель этого файла: дать LLM/нейросети быстрый, точный и практичный контекст, чтобы она могла безопасно править сайт без “случайных” регрессий.
+
+1) TL;DR (самое важное)
+Прод домен: lerasystem.ru (есть редирект с www.).
+Reverse proxy: Caddy → проксирует на app:3000 (Next.js контейнер).
+Все API вызовы: ТОЛЬКО через pages/api, нет Server Actions.
+Формы лидов (аудит / KPI доступ):
+POST /api/send-kpi-request (основной)
+POST /api/submit-lead (fallback)
+Кнопка “Записаться на аудит”:
+disabled если заявка уже отправлена (localStorage.audit_submitted === 'true')
+disabled если таймер истёк (useAuditTimer().isExpired === true)
+в 00:00 по Москве делается reset: кнопка становится активной, таймерные cookies очищаются.
+Анонс-диалог про аудит: появляется через 3 минуты после принятия cookie-consent и показывается 1 раз за всё время (cookie на 365 дней).
+Панель метрик: https://lerasystem.ru/met с логином lerametric / LeraMetric2025!secure.
+AI Content Enhancer: /content-enhancer для генерации персонализированного контента.
+2) Технологический стек
+Next.js 15 (App Router): src/app/*
+Pages API: src/pages/api/* (все API эндпоинты здесь)
+React, TypeScript
+Tailwind + shadcn/ui
+Docker + docker-compose
+Caddy как reverse proxy / TLS
+AI: Gemini API через Genkit (для content-enhancer)
+3) Запуск / Деплой (Docker)
+Контейнеры
+lera_app — Next.js (порт 3000)
+caddy — reverse proxy (80/443)
+Файлы
+docker-compose.yml
+docker-compose.prod.yml
+Dockerfile
+Caddyfile
+Быстрый апдейт
+cd /root/.cursor-server/site
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --force-recreate
+4) Ключевые UI-компоненты и логика
+4.1 Cookie-consent
+Источник истины: localStorage.cookie_consent === 'true'
+После принятия:
+ставится timestamp согласия: cookie audit_consent_ts (секунды)
+диспатчится event cookie-consent-given
+Файл: src/components/ui/cookie-consent.tsx
+4.2 Анонс-диалог “Специальное предложение”
+Компонент: src/components/modals/audit-announcement-dialog.tsx
+Появление: через 180 секунд после audit_consent_ts (после принятия cookies).
+Показ: один раз за всё время:
+cookie audit_announcement_shown=true (expires 365 дней)
+Важное:
+при закрытии (любой способ) cookie всё равно ставится (чтобы не “всплывал бесконечно”).
+кнопка в диалоге диспатчит event audit-announcement-accepted (это запускает таймер).
+4.3 Таймер 10 минут и дневной reset (Москва)
+Хук: src/hooks/use-audit-timer.ts
+Таймер стартует только по событию audit-announcement-accepted.
+Cookies:
+audit_timer_start_ts — старт (unix seconds)
+audit_timer_activated=true — таймер запускали
+audit_timer_expired=true — истёк
+Reset в полночь Europe/Moscow:
+localStorage.audit_submitted удаляется
+все таймерные cookies удаляются (expired/start/activated)
+UI состояния сбрасываются (кнопка становится активной, таймер не показывается)
+диспатчится audit-day-reset (чтобы форма перерисовалась)
+5) Формы лидов (аудит / KPI)
+5.1 Где формы
+CTA форма “аудит”: src/components/sections/cta-section.tsx
+KPI модалка: src/components/modals/lead-capture-modal.tsx
+5.2 Как отправляем
+XMLHttpRequest, не fetch (для совместимости с Next.js)
+URL: POST /api/send-kpi-request?_t=${Date.now()}
+В запросе есть X-Requested-With: XMLHttpRequest.
+5.3 Валидация
+В cta-section.tsx используется zod + react-hook-form.
+Есть обязательные чекбоксы:
+
+privacyConsent (политика)
+newsletterConsent (полезные материалы)
+5.4 Флаг “заявка отправлена”
+localStorage.audit_submitted = 'true' после успеха → кнопка disabled.
+В полночь по Москве этот флаг сбрасывается.
+6) API эндпоинты (важно!)
+6.1 Лиды: ТОЛЬКО pages/api
+Основной:
+
+src/pages/api/send-kpi-request.ts
+Принимает JSON: { name, contact, telegram?, businessDescription?, newsletterConsent, source }
+Сохраняет в data/metrics.json через saveLead()
+Отправляет в Telegram (best-effort)
+Ставит cookie kpi_access_granted=true (30 дней, SameSite=Lax, Secure в проде)
+Fallback:
+
+src/pages/api/submit-lead.ts
+Аналогичный функционал (best-effort)
+6.2 Метрики / админка
+src/app/met/* — страница метрик/лидов
+API эндпоинты:
+POST /api/login — аутентификация
+GET /api/get-metrics — получение данных
+POST /api/reset-tag-counter — сброс счетчика
+POST /api/reset-all-counters — сброс всех счетчиков
+POST /api/clear-leads — очистка лидов
+6.3 Content Enhancer (AI)
+src/pages/api/content-enhancer.ts
+Принимает: { businessDescription, targetAudience, keyBenefits, callToAction }
+Возвращает персонализированный контент через Gemini API
+6.4 ВАЖНО: все API в pages/api
+Все API эндпоинты находятся в src/pages/api/ для избежания проблем с Server Actions. В проекте Server Actions полностью отключены.
+
+7) Хранилище лидов/метрик
+Файл данных: site/data/metrics.json
+Логика: src/lib/metrics-db.ts
+Используется:
+pages/api/send-kpi-request.ts
+pages/api/submit-lead.ts
+pages/api/get-metrics.ts
+app/met/* для отображения
+8) Reverse proxy / Caddy
+Файл: Caddyfile
+
+Ключевые требования:
+
+Проксировать на app:3000
+Прокидывать:
+Host {host}
+X-Forwarded-Host {host}
+X-Forwarded-Proto {scheme}
+X-Real-IP {remote_host}
+Отключать кеш для HTML и API (чтобы клиенты быстрее получали свежие бандлы и не “залипали” на старых версиях).
+9) Архитектурные решения
+9.1 Отключение Server Actions
+Почему отключены: Server Actions вызывали конфликты с router state и приводили к ошибкам “Missing ‘next-action’ header”
+Решение: Все действия переведены на обычные API вызовы через fetch/XMLHttpRequest
+Файл: next.config.ts - serverActions.enabled: false
+8.2 API-first подход
+Все операции (аутентификация, метрики, сброс счетчиков) реализованы через REST API
+Клиенты используют fetch или XMLHttpRequest для коммуникации
+Сервер отвечает JSON с статусом успеха/ошибки
+8.3 Временные зоны
+Все время отображается в московском часовом поясе (Europe/Moscow)
+Сброс счетчиков и таймеров происходит в полночь по Москве
+11) Частые проблемы и диагностика
+11.1 403 на отправке формы
+Проверь:
+
+эндпоинт действительно pages/api (а не app/api)
+запрос идёт на https://lerasystem.ru/api/send-kpi-request
+в Caddy сохраняется Host (иначе возможны origin/CSRF нюансы)
+11.2 Клиент “залип” на старом JS после деплоя
+Симптомы: странные ошибки, несовпадение логики.
+Решение: hard reload / очистка кеша + для сервера отключение кеша HTML (есть в Caddyfile).
+
+11.3 “После полуночи всё ломается”
+Ожидаемое поведение:
+
+диалог НЕ должен появляться снова
+таймер не должен появляться снова
+кнопка становится активной
+Если не так:
+
+проверить use-audit-timer.ts (reset делается по Москве)
+убедиться, что удаляются все таймерные cookies (expired/start/activated)
+11.4 Ошибки “Missing ‘next-action’ header”
+Эта ошибка больше не должна возникать, так как Server Actions полностью отключены.
+Если возникает - проверить, что в next.config.ts serverActions.enabled: false.
+
+12) Текущий статус проекта
+✅ Рабочие функции:
+Главная страница: Полностью функциональна, без ошибок JavaScript
+Формы заявок: Отправка лидов в Telegram и базу данных
+Cookie consent: Согласие и аналитика
+Audit timer: 10-минутный таймер с ежедневным сбросом
+Audit announcement: Диалог специального предложения
+Панель метрик: Просмотр статистики, сброс счетчиков, очистка лидов
+Content Enhancer: AI-генерация персонализированного контента
+Трекинг: Сбор статистики посещений и кликов
+🔧 Технические особенности:
+Server Actions отключены для стабильности
+API-first архитектура для всех операций
+Moscow timezone для всех временных меток
+Docker + Caddy для продакшена
+TypeScript + React для frontend
+Next.js 15 с App Router
+📊 Метрики и аналитика:
+Все данные хранятся в site/data/metrics.json
+Доступ к панели: /met (логин: lerametric / LeraMetric2025!secure)
+API для получения данных: GET /api/get-metrics
+Автоматический сброс счетчиков в полночь по Москве
+10) Мониторинг и диагностика
+10.1 Скрипт мониторинга
+Файл: site/monitoring.sh
+Запуск: каждые 5 минут через cron: */5 * * * * /root/.cursor-server/site/monitoring.sh
+Лог: /root/.cursor-server/site/monitoring.log
+10.2 Что мониторится:
+Статус контейнеров (Docker)
+Health check через GET /api/health
+Ошибки в логах за последние 5 минут (app + caddy)
+Использование ресурсов (CPU, память)
+SSL сертификат (срок действия)
+10.3 Быстрые проверки:
+# Статус контейнеров
+docker ps
+
+# Логи приложения
+docker logs lera_app --tail 50
+
+# Логи Caddy
+docker logs caddy --tail 20
+
+# Health check
+curl https://lerasystem.ru/api/health
+
+# Тест API лидов
+curl -X POST https://lerasystem.ru/api/send-kpi-request \
+  -H "Content-Type: application/json" \
+  -H "X-Requested-With: XMLHttpRequest" \
+  -d '{"name":"Test","contact":"123","source":"test"}'
+13) Карта файлов (быстрый поиск)
+Audit CTA форма: src/components/sections/cta-section.tsx
+KPI lead modal: src/components/modals/lead-capture-modal.tsx
+Audit announcement dialog: src/components/modals/audit-announcement-dialog.tsx
+Audit timer hook: src/hooks/use-audit-timer.ts
+Cookie consent UI: src/components/ui/cookie-consent.tsx
+Content enhancer: src/app/content-enhancer/content-enhancer-client.tsx
+Leads API (main): src/pages/api/send-kpi-request.ts
+Leads API (fallback): src/pages/api/submit-lead.ts
+Metrics API: src/pages/api/get-metrics.ts, src/pages/api/login.ts
+Content enhancer API: src/pages/api/content-enhancer.ts
+Metrics DB: src/lib/metrics-db.ts
+Met dashboard: src/app/met/dashboard.tsx, src/app/met/login-form.tsx
+Monitoring script: site/monitoring.sh
+Monitoring log: site/monitoring.log
+Proxy: Caddyfile
+Next config: next.config.ts
